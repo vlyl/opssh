@@ -1,0 +1,31 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - exhaustive
+    - gosec
+    - misspell
+    - nilerr
+    - noctx
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+
+  exclusions:
+    presets:
+      - comments
+    rules:
+      - path: _test\.go
+        linters: [gosec]
+
+formatters:
+  enable: [gofmt, goimports]

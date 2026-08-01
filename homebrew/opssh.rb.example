@@ -1,0 +1,33 @@
+class Opssh < Formula
+  desc "Manage OpenSSH hosts backed by the 1Password SSH Agent"
+  homepage "https://github.com/vlyl/opssh"
+  version "0.1.0"
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "https://github.com/vlyl/opssh/releases/download/v#{version}/opssh_#{version}_darwin_arm64.tar.gz"
+      sha256 "REPLACE_WITH_RELEASE_CHECKSUM"
+    else
+      url "https://github.com/vlyl/opssh/releases/download/v#{version}/opssh_#{version}_darwin_amd64.tar.gz"
+      sha256 "REPLACE_WITH_RELEASE_CHECKSUM"
+    end
+  end
+
+  on_linux do
+    if Hardware::CPU.arm?
+      url "https://github.com/vlyl/opssh/releases/download/v#{version}/opssh_#{version}_linux_arm64.tar.gz"
+      sha256 "REPLACE_WITH_RELEASE_CHECKSUM"
+    else
+      url "https://github.com/vlyl/opssh/releases/download/v#{version}/opssh_#{version}_linux_amd64.tar.gz"
+      sha256 "REPLACE_WITH_RELEASE_CHECKSUM"
+    end
+  end
+
+  def install
+    bin.install "opssh"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/opssh --version")
+  end
+end

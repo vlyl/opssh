@@ -1,0 +1,37 @@
+version: 1
+
+defaults:
+  identity_agent: "~/.1password/agent.sock"
+  connect_timeout: 10s
+  server_alive_interval: 30
+  server_alive_count_max: 3
+
+hosts:
+  prod-web:
+    hostname: "192.0.2.10"
+    user: "root"
+    port: 22
+    key:
+      provider: "1password"
+      account_id: "account-id"
+      vault_id: "vault-id"
+      item_id: "item-id"
+      title: "prod-web-key"
+      fingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      public_key_file: "~/.ssh/opssh/public_keys/prod-web.pub"
+    proxy:
+      type: "none"
+    options:
+      identities_only: true
+      strict_host_key_checking: "ask"
+      server_alive_interval: 30
+      server_alive_count_max: 3
+
+tunnels:
+  prod-postgres:
+    ssh_host: "prod-web"
+    local_host: "127.0.0.1"
+    local_port: 15432
+    remote_host: "127.0.0.1"
+    remote_port: 5432
+    reconnect: false

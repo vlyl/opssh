@@ -1,0 +1,12 @@
+# Managed by opssh. Manual changes may be overwritten.
+
+Host prod-web
+    HostName 192.0.2.10
+    User root
+    Port 22
+    IdentityAgent "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
+    IdentityFile "~/.ssh/opssh/public_keys/prod-web.pub"
+    IdentitiesOnly yes
+    StrictHostKeyChecking ask
+    ServerAliveInterval 30
+    ServerAliveCountMax 3

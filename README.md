@@ -1,5 +1,8 @@
 # opssh
 
+[![CI](https://github.com/vlyl/opssh/actions/workflows/ci.yml/badge.svg)](https://github.com/vlyl/opssh/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/vlyl/opssh)](https://github.com/vlyl/opssh/releases/latest)
+
 `opssh` is a Go CLI and terminal UI for managing OpenSSH hosts whose signing identities remain in the 1Password SSH Agent. It keeps server metadata, public-key bindings, proxy settings, and local tunnels together without importing or exporting SSH private keys.
 
 > Security boundary: opssh only handles SSH public keys, fingerprints, 1Password item/Vault/account identifiers, Agent socket paths, and non-secret connection settings. SSH signatures are produced by the 1Password SSH Agent.
@@ -74,7 +77,7 @@ make build
 install -m 0755 bin/opssh ~/.local/bin/opssh
 ```
 
-For releases, download the archive for `darwin/arm64`, `darwin/amd64`, `linux/arm64`, or `linux/amd64`, verify it against `checksums.txt`, and place `opssh` on `PATH`.
+For releases, download the archive for `darwin/arm64`, `darwin/amd64`, `linux/arm64`, or `linux/amd64` from the [latest release](https://github.com/vlyl/opssh/releases/latest), verify it against `checksums.txt`, and place `opssh` on `PATH`.
 
 The repository also contains an illustrative [Homebrew formula](homebrew/opssh.rb.example). Replace its example checksums with those from a real release.
 
@@ -313,6 +316,8 @@ make snapshot
 ```
 
 Tests use fake `op`, `ssh`, and `ssh-add` executables, temporary homes, security regression fixtures, transaction interruption tests, Golden SSH configuration, and race detection. No real 1Password account or developer SSH directory is required.
+
+GitHub Actions runs formatting, module, vet, lint, test, race, and command-boundary checks on pushes and pull requests. Pushing a `v*` tag runs GoReleaser and creates a draft GitHub Release for review before publication.
 
 ## License
 

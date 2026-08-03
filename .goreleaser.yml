@@ -30,6 +30,19 @@ archives:
 checksum:
   name_template: checksums.txt
 
+homebrew_casks:
+  - name: opssh
+    ids: [default]
+    binaries: [opssh]
+    homepage: https://github.com/vlyl/opssh
+    description: Manage OpenSSH hosts backed by the 1Password SSH Agent
+    url:
+      verified: github.com/vlyl/opssh/
+    repository:
+      owner: vlyl
+      name: opssh
+      branch: main
+
 changelog:
   sort: asc
   filters:

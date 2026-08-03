@@ -15,13 +15,13 @@ import (
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/vlyl/opssh/internal/app"
 	"github.com/vlyl/opssh/internal/doctor"
 	"github.com/vlyl/opssh/internal/domain"
 	"github.com/vlyl/opssh/internal/logging"
 	"github.com/vlyl/opssh/internal/onepassword"
 	"github.com/vlyl/opssh/internal/process"
+	"github.com/vlyl/opssh/internal/security"
 	"github.com/vlyl/opssh/internal/tunnel"
 )
 
@@ -50,6 +50,7 @@ const (
 	screenTunnels
 	screenError
 	screenCommand
+	screenHelp
 )
 
 type operationFactory func(context.Context, uint64) tea.Cmd
@@ -58,7 +59,8 @@ type hostItem struct{ host domain.Host }
 
 func (item hostItem) Title() string { return item.host.Alias }
 func (item hostItem) Description() string {
-	return net.JoinHostPort(unbracket(item.host.Hostname), strconv.Itoa(int(item.host.Port))) + "  " + item.host.Key.Fingerprint
+	target := item.host.User + "@" + net.JoinHostPort(unbracket(item.host.Hostname), strconv.Itoa(int(item.host.Port)))
+	return target + "  •  " + proxyDescription(item.host.Proxy)
 }
 func (item hostItem) FilterValue() string {
 	return item.host.Alias + " " + item.host.Hostname + " " + item.host.User
@@ -66,8 +68,17 @@ func (item hostItem) FilterValue() string {
 
 type keyItem struct{ key domain.PublicKeyMetadata }
 
-func (item keyItem) Title() string       { return item.key.Title }
-func (item keyItem) Description() string { return item.key.AccountName + " / " + item.key.VaultName }
+func (item keyItem) Title() string { return item.key.Title }
+func (item keyItem) Description() string {
+	location := strings.Trim(strings.TrimSpace(item.key.AccountName)+" / "+strings.TrimSpace(item.key.VaultName), " /")
+	if item.key.Fingerprint == "" {
+		return location
+	}
+	if location == "" {
+		return item.key.Fingerprint
+	}
+	return location + "  •  " + item.key.Fingerprint
+}
 func (item keyItem) FilterValue() string { return item.Title() + " " + item.Description() }
 
 type proxyItem struct {
@@ -115,18 +126,13 @@ type Model struct {
 	activeOpID  uint64
 	commandBack screen
 	commandErr  string
+	formErr     string
+	helpBack    screen
 	plan        app.Plan
 	wizard      wizard
 	deleteAlias string
 	tunnelNames []string
 	styles      styles
-}
-
-type styles struct {
-	title  lipgloss.Style
-	help   lipgloss.Style
-	error  lipgloss.Style
-	status lipgloss.Style
 }
 
 type hostsLoadedMsg struct {
@@ -186,30 +192,31 @@ func Run(dependencies Dependencies) error {
 }
 
 func NewModel(dependencies Dependencies) Model {
-	delegate := list.NewDefaultDelegate()
+	noColor := dependencies.NoColor || os.Getenv("NO_COLOR") != ""
+	styleSet := newStyles(noColor)
+	delegate := newListDelegate(styleSet)
 	hostList := list.New(nil, delegate, 80, 20)
-	hostList.Title = "opssh hosts"
+	configureList(&hostList, "host", "hosts", styleSet)
 	hostList.AdditionalFullHelpKeys = nil
 	choiceList := list.New(nil, delegate, 80, 16)
+	configureList(&choiceList, "choice", "choices", styleSet)
 	input := textinput.New()
 	input.CharLimit = 253
+	input.PromptStyle = styleSet.fieldLabel
+	input.TextStyle = styleSet.fieldValue
+	input.Cursor.Style = styleSet.cursor
 	commandInput := textinput.New()
-	commandInput.Prompt = ": "
+	commandInput.Prompt = "opssh  "
 	commandInput.CharLimit = 128
+	commandInput.PromptStyle = styleSet.fieldLabel
+	commandInput.TextStyle = styleSet.fieldValue
+	commandInput.Cursor.Style = styleSet.cursor
 	spin := spinner.New()
 	spin.Spinner = spinner.Dot
+	spin.Style = styleSet.accent
 	columns := []table.Column{{Title: "Level", Width: 7}, {Title: "Check", Width: 26}, {Title: "Result", Width: 60}}
 	tableModel := table.New(table.WithColumns(columns), table.WithHeight(15), table.WithFocused(true))
-	noColor := dependencies.NoColor || os.Getenv("NO_COLOR") != ""
-	styleSet := styles{
-		title: lipgloss.NewStyle().Bold(true), help: lipgloss.NewStyle().Faint(true),
-		error: lipgloss.NewStyle().Bold(true), status: lipgloss.NewStyle(),
-	}
-	if !noColor {
-		styleSet.title = styleSet.title.Foreground(lipgloss.Color("63"))
-		styleSet.error = styleSet.error.Foreground(lipgloss.Color("196"))
-		styleSet.status = styleSet.status.Foreground(lipgloss.Color("42"))
-	}
+	tableModel.SetStyles(newTableStyles(styleSet))
 	return Model{deps: dependencies, screen: screenHosts, hosts: hostList, choices: choiceList, input: input, command: commandInput, spinner: spin, table: tableModel, loading: true, operation: "load managed hosts", styles: styleSet}
 }
 
@@ -224,10 +231,7 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch typed := message.(type) {
 	case tea.WindowSizeMsg:
 		model.width, model.height = typed.Width, typed.Height
-		model.hosts.SetSize(max(30, typed.Width-4), max(5, typed.Height-8))
-		model.choices.SetSize(max(30, typed.Width-4), max(5, typed.Height-8))
-		model.table.SetWidth(max(40, typed.Width-4))
-		model.table.SetHeight(max(5, typed.Height-8))
+		model.resizeComponents()
 	case spinner.TickMsg:
 		var command tea.Cmd
 		model.spinner, command = model.spinner.Update(typed)
@@ -278,6 +282,7 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		})
 	case doctorLoadedMsg:
 		model = model.completeOperation()
+		model.configureTable("Level", "Check", "Result")
 		rows := make([]table.Row, 0, len(typed.findings))
 		for _, finding := range typed.findings {
 			rows = append(rows, table.Row{string(finding.Level), finding.Code, finding.Message})
@@ -289,6 +294,7 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return model.showError(typed.err), nil
 		}
 		model = model.completeOperation()
+		model.configureTable("State", "Tunnel", "Route")
 		rows := make([]table.Row, 0, len(typed.statuses))
 		model.tunnelNames = model.tunnelNames[:0]
 		for _, status := range typed.statuses {
@@ -337,8 +343,15 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return model, nil
 	}
-	if isKey && key.String() == ":" && model.screen != screenInput && model.screen != screenCommand && !model.hosts.SettingFilter() {
+	if isKey && key.String() == ":" && model.screen != screenInput && model.screen != screenCommand && !model.activeListFiltering() {
 		return model.openCommandPalette(), nil
+	}
+	if isKey && key.String() == "?" && model.screen != screenInput && model.screen != screenCommand && !model.activeListFiltering() {
+		if model.screen == screenHelp {
+			model.screen = model.helpBack
+			return model, nil
+		}
+		return model.openHelp(), nil
 	}
 	switch model.screen {
 	case screenHosts:
@@ -370,6 +383,13 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case screenCommand:
 		return model.updateCommand(message)
+	case screenHelp:
+		if isKey {
+			switch key.String() {
+			case "esc", "enter", "q":
+				model.screen = model.helpBack
+			}
+		}
 	}
 	return model, nil
 }
@@ -380,6 +400,10 @@ func (model Model) updateHosts(message tea.Msg) (tea.Model, tea.Cmd) {
 		switch key.String() {
 		case "q":
 			return model, tea.Quit
+		case "r":
+			return model.startOperation("refresh managed hosts", func(ctx context.Context, operationID uint64) tea.Cmd {
+				return model.loadHosts(ctx, operationID)
+			})
 		case "a":
 			return model.beginAdd(), nil
 		case "e":
@@ -426,6 +450,8 @@ func (model Model) updateHosts(message tea.Msg) (tea.Model, tea.Cmd) {
 
 func (model Model) beginAdd() Model {
 	model.wizard = wizard{port: 22, proxy: domain.Proxy{Type: domain.ProxyNone}}
+	model.formErr = ""
+	model.status = ""
 	model.screen = screenInput
 	model.configureInput("Host alias", "")
 	return model
@@ -433,6 +459,8 @@ func (model Model) beginAdd() Model {
 
 func (model Model) beginEdit(host domain.Host) Model {
 	model.wizard = wizard{editing: true, originalAlias: host.Alias, alias: host.Alias, hostname: host.Hostname, user: host.User, port: host.Port, proxy: host.Proxy, reference: host.Key.Reference, keyTitle: host.Key.Title}
+	model.formErr = ""
+	model.status = ""
 	model.screen = screenInput
 	model.configureInput("Host alias", host.Alias)
 	return model
@@ -443,6 +471,26 @@ func (model *Model) configureInput(prompt, value string) {
 	model.input.SetValue(value)
 	model.input.CursorEnd()
 	model.input.Focus()
+	model.formErr = ""
+}
+
+func (model Model) previousWizardField() Model {
+	switch model.wizard.step {
+	case 0:
+		model.screen = screenHosts
+	case 1:
+		model.wizard.step = 0
+		model.configureInput("Host alias", model.wizard.alias)
+	case 2:
+		model.wizard.step = 1
+		model.configureInput("Hostname or IP", model.wizard.hostname)
+	case 3:
+		model.wizard.step = 2
+		model.configureInput("SSH user", model.wizard.user)
+	default:
+		model.screen = screenHosts
+	}
+	return model
 }
 
 func (model Model) updateInput(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -450,14 +498,22 @@ func (model Model) updateInput(message tea.Msg) (tea.Model, tea.Cmd) {
 		return model.updateProxyEndpoint(message)
 	}
 	if key, ok := message.(tea.KeyMsg); ok {
-		if key.String() == "esc" {
+		switch key.String() {
+		case "esc":
 			model.screen = screenHosts
+			model.formErr = ""
 			return model, nil
-		}
-		if key.String() == "enter" {
+		case "shift+tab":
+			return model.previousWizardField(), nil
+		case "enter":
 			value := strings.TrimSpace(model.input.Value())
 			if value == "" {
-				return model.showError(errors.New("this field is required")), nil
+				model.formErr = "This field is required"
+				return model, nil
+			}
+			if validationMessage := wizardValidationMessage(model.wizard.step, value); validationMessage != "" {
+				model.formErr = validationMessage
+				return model, nil
 			}
 			if model.wizard.editing {
 				switch model.wizard.step {
@@ -476,7 +532,8 @@ func (model Model) updateInput(message tea.Msg) (tea.Model, tea.Cmd) {
 				case 3:
 					port, err := strconv.ParseUint(value, 10, 16)
 					if err != nil || port == 0 {
-						return model.showError(errors.New("invalid SSH port")), nil
+						model.formErr = "Enter an SSH port from 1 to 65535"
+						return model, nil
 					}
 					model.wizard.port = uint16(port)
 					return model.beginProxyPicker(), nil
@@ -498,18 +555,39 @@ func (model Model) updateInput(message tea.Msg) (tea.Model, tea.Cmd) {
 				case 3:
 					port, err := strconv.ParseUint(value, 10, 16)
 					if err != nil || port == 0 {
-						return model.showError(errors.New("invalid SSH port")), nil
+						model.formErr = "Enter an SSH port from 1 to 65535"
+						return model, nil
 					}
 					model.wizard.port = uint16(port)
 					return model.beginProxyPicker(), nil
 				}
 			}
 			return model, nil
+		default:
+			model.formErr = ""
 		}
 	}
 	var command tea.Cmd
 	model.input, command = model.input.Update(message)
 	return model, command
+}
+
+func wizardValidationMessage(step int, value string) string {
+	switch step {
+	case 0:
+		if security.ValidateAlias(value) != nil {
+			return "Use 1–64 letters, numbers, dots, underscores, or hyphens; start with a letter or number"
+		}
+	case 1:
+		if security.ValidateHostname(value) != nil {
+			return "Enter a valid DNS hostname or IP address"
+		}
+	case 2:
+		if security.ValidateUsername(value) != nil {
+			return "Enter a valid SSH username without spaces"
+		}
+	}
+	return ""
 }
 
 func (model Model) beginProxyPicker() Model {
@@ -519,30 +597,64 @@ func (model Model) beginProxyPicker() Model {
 	}
 	model.choices.Title = "Select proxy type"
 	model.choices.SetItems(items)
+	model.choices.Select(proxyIndex(model.wizard.proxy.Type))
+	model.formErr = ""
 	model.screen = screenProxy
 	return model
 }
 
+func proxyIndex(proxyType domain.ProxyType) int {
+	switch proxyType {
+	case domain.ProxyNone:
+		return 0
+	case domain.ProxySOCKS5:
+		return 1
+	case domain.ProxyHTTPConnect:
+		return 2
+	case domain.ProxyJump:
+		return 3
+	default:
+		return 0
+	}
+}
+
 func (model Model) updateChoices(message tea.Msg) (tea.Model, tea.Cmd) {
 	if key, ok := message.(tea.KeyMsg); ok {
-		if key.String() == "esc" {
+		switch key.String() {
+		case "esc":
 			model.screen = screenHosts
 			return model, nil
-		}
-		if key.String() == "enter" {
+		case "shift+tab":
+			if model.screen == screenProxy {
+				model.wizard.step = 3
+				model.screen = screenInput
+				model.configureInput("SSH port", strconv.Itoa(int(model.wizard.port)))
+				return model, nil
+			}
+			if model.screen == screenKeys {
+				return model.beginProxyPicker(), nil
+			}
+		case "enter":
 			switch selected := model.choices.SelectedItem().(type) {
 			case proxyItem:
-				model.wizard.proxy = domain.Proxy{Type: selected.typeValue}
+				if model.wizard.proxy.Type != selected.typeValue {
+					model.wizard.proxy = domain.Proxy{Type: selected.typeValue}
+				}
 				if selected.typeValue == domain.ProxyNone {
+					model.wizard.proxy = domain.Proxy{Type: domain.ProxyNone}
 					return model.afterProxy()
 				}
 				model.screen = screenInput
 				model.wizard.step = 100
 				prompt := "Proxy host:port"
+				value := ""
 				if selected.typeValue == domain.ProxyJump {
 					prompt = "ProxyJump alias"
+					value = model.wizard.proxy.JumpHost
+				} else if model.wizard.proxy.Host != "" && model.wizard.proxy.Port != 0 {
+					value = net.JoinHostPort(unbracket(model.wizard.proxy.Host), strconv.Itoa(int(model.wizard.proxy.Port)))
 				}
-				model.configureInput(prompt, "")
+				model.configureInput(prompt, value)
 				return model, nil
 			case keyItem:
 				model.wizard.reference, model.wizard.keyTitle = selected.key.Reference, selected.key.Title
@@ -558,22 +670,47 @@ func (model Model) updateChoices(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (model Model) updateProxyEndpoint(message tea.Msg) (tea.Model, tea.Cmd) {
-	if key, ok := message.(tea.KeyMsg); ok && key.String() == "enter" {
-		value := strings.TrimSpace(model.input.Value())
-		if model.wizard.proxy.Type == domain.ProxyJump {
-			model.wizard.proxy.JumpHost = value
-		} else {
-			host, portText, err := net.SplitHostPort(value)
-			if err != nil {
-				return model.showError(errors.New("proxy endpoint must be host:port")), nil
+	if key, ok := message.(tea.KeyMsg); ok {
+		switch key.String() {
+		case "esc":
+			model.screen = screenHosts
+			model.formErr = ""
+			return model, nil
+		case "shift+tab":
+			return model.beginProxyPicker(), nil
+		case "enter":
+			value := strings.TrimSpace(model.input.Value())
+			if value == "" {
+				model.formErr = "This field is required"
+				return model, nil
 			}
-			port, err := strconv.ParseUint(portText, 10, 16)
-			if err != nil || port == 0 {
-				return model.showError(errors.New("invalid proxy port")), nil
+			if model.wizard.proxy.Type == domain.ProxyJump {
+				if security.ValidateAlias(value) != nil {
+					model.formErr = "Enter a valid managed host alias"
+					return model, nil
+				}
+				model.wizard.proxy.JumpHost = value
+			} else {
+				host, portText, err := net.SplitHostPort(value)
+				if err != nil {
+					model.formErr = "Use host:port, for example 127.0.0.1:1080"
+					return model, nil
+				}
+				if security.ValidateHostname(host) != nil {
+					model.formErr = "Enter a valid proxy hostname or IP address"
+					return model, nil
+				}
+				port, err := strconv.ParseUint(portText, 10, 16)
+				if err != nil || port == 0 {
+					model.formErr = "Enter a proxy port from 1 to 65535"
+					return model, nil
+				}
+				model.wizard.proxy.Host, model.wizard.proxy.Port = host, uint16(port)
 			}
-			model.wizard.proxy.Host, model.wizard.proxy.Port = host, uint16(port)
+			return model.afterProxy()
+		default:
+			model.formErr = ""
 		}
-		return model.afterProxy()
 	}
 	var command tea.Cmd
 	model.input, command = model.input.Update(message)
@@ -600,6 +737,10 @@ func (model Model) updatePreview(message tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		case "n", "esc":
 			model.screen = screenHosts
+		case "e":
+			model.wizard.step = 0
+			model.screen = screenInput
+			model.configureInput("Host alias", model.wizard.alias)
 		}
 	}
 	return model, nil
@@ -635,7 +776,7 @@ func (model Model) updateTable(message tea.Msg) (tea.Model, tea.Cmd) {
 					return model.startOperation("start tunnel "+name, func(ctx context.Context, operationID uint64) tea.Cmd {
 						return model.startTunnel(ctx, operationID, name)
 					})
-				case "k":
+				case "x":
 					return model.startOperation("stop tunnel "+name, func(ctx context.Context, operationID uint64) tea.Cmd {
 						return model.stopTunnel(ctx, operationID, name)
 					})
@@ -646,76 +787,6 @@ func (model Model) updateTable(message tea.Msg) (tea.Model, tea.Cmd) {
 	var command tea.Cmd
 	model.table, command = model.table.Update(message)
 	return model, command
-}
-
-func (model Model) View() string {
-	if model.loading {
-		return "\n  " + model.spinner.View() + " " + titleWord(model.operation) + "…\n\n  " + model.styles.help.Render("Esc cancel current operation")
-	}
-	if model.screen == screenHosts && model.width > 0 && (model.width < 60 || model.height < 12) {
-		return model.compactView()
-	}
-	switch model.screen {
-	case screenHosts:
-		return model.hosts.View() + "\n" + model.styles.help.Render("Enter Connect   a Add   e Edit   t Tunnel   s Sync   d Delete   x Test   D Doctor   / Search   : Command   q Quit") + statusLine(model)
-	case screenInput:
-		return model.styles.title.Render("Host wizard") + "\n\n" + model.input.View() + "\n\n" + model.styles.help.Render("Enter continue • Esc cancel")
-	case screenProxy, screenKeys:
-		return model.choices.View()
-	case screenPreview:
-		return model.styles.title.Render("Configuration preview") + "\n\n" + model.plan.ConfigPreview + "\n" + renderChanges(model.plan) + renderNotices(model.plan) + "\nApply? y/Enter Yes • n/Esc No"
-	case screenConfirmDelete:
-		return model.styles.error.Render("Delete "+model.deleteAlias+" from opssh?") + "\nOnly its managed config and .pub file will be removed.\ny Yes • n/Esc No"
-	case screenDoctor:
-		return model.styles.title.Render("Doctor") + "\n" + model.table.View() + "\n" + model.styles.help.Render("Esc back")
-	case screenTunnels:
-		return model.styles.title.Render("Tunnels") + "\n" + model.table.View() + "\n" + model.styles.help.Render("s Start • k Stop • Esc back")
-	case screenError:
-		return model.renderErrorView()
-	case screenCommand:
-		message := ""
-		if model.commandErr != "" {
-			message = "\n\n" + model.styles.error.Render(model.commandErr)
-		}
-		return model.styles.title.Render("Command") + "\n\n" + model.command.View() + message + "\n\n" + model.styles.help.Render("Built-ins: doctor • config validate • list • tunnel list • retry • cancel • quit\nEnter run • Esc close command input")
-	default:
-		return "opssh"
-	}
-}
-
-func (model Model) compactView() string {
-	if model.screen == screenHosts {
-		selected := model.selectedHost()
-		if selected == nil {
-			return "opssh — no hosts\nq quit • a add"
-		}
-		return fmt.Sprintf("opssh — %s\n%s@%s:%d\nEnter connect • / search • q quit", selected.Alias, selected.User, selected.Hostname, selected.Port)
-	}
-	return "opssh\nTerminal is small; resize or press Esc."
-}
-
-func (model Model) renderErrorView() string {
-	var builder strings.Builder
-	_, _ = fmt.Fprintln(&builder, model.styles.error.Render("Error details"))
-	operation := model.operation
-	if operation == "" {
-		operation = "unspecified operation"
-	}
-	_, _ = fmt.Fprintf(&builder, "\nOperation:\n  %s\n\nSummary:\n  %s\n", operation, model.err.Error())
-	if len(model.errorCauses) > 0 {
-		_, _ = fmt.Fprintln(&builder, "\nCause chain:")
-		for index, cause := range model.errorCauses {
-			_, _ = fmt.Fprintf(&builder, "  %d. %s\n", index+1, cause)
-		}
-	}
-	if len(model.diagnostics) > 0 {
-		_, _ = fmt.Fprintln(&builder, "\nDiagnostic commands:")
-		for _, command := range model.diagnostics {
-			_, _ = fmt.Fprintf(&builder, "  %s\n", command)
-		}
-	}
-	_, _ = fmt.Fprint(&builder, "\nr Retry   :/Enter Command   Esc cancel current operation   q Quit")
-	return builder.String()
 }
 
 func safeErrorChain(err error) (string, []string) {
@@ -772,6 +843,24 @@ func (model Model) openCommandPalette() Model {
 	return model
 }
 
+func (model Model) openHelp() Model {
+	model.helpBack = model.screen
+	model.screen = screenHelp
+	return model
+}
+
+func (model Model) activeListFiltering() bool {
+	switch model.screen {
+	case screenHosts:
+		return model.hosts.SettingFilter()
+	case screenProxy, screenKeys:
+		return model.choices.SettingFilter()
+	case screenInput, screenPreview, screenConfirmDelete, screenDoctor, screenTunnels, screenError, screenCommand, screenHelp:
+		return false
+	}
+	return false
+}
+
 func (model Model) updateCommand(message tea.Msg) (tea.Model, tea.Cmd) {
 	if key, ok := message.(tea.KeyMsg); ok {
 		switch key.String() {
@@ -814,7 +903,12 @@ func (model Model) updateCommand(message tea.Msg) (tea.Model, tea.Cmd) {
 				return model, nil
 			case "quit", "q":
 				return model, tea.Quit
-			case "", "help":
+			case "help", "?":
+				model.command.Blur()
+				model.helpBack = screenCommand
+				model.screen = screenHelp
+				return model, nil
+			case "":
 				model.commandErr = "Enter one of the listed built-in commands"
 				return model, nil
 			default:
@@ -870,6 +964,7 @@ func (model Model) cancelOperation() Model {
 	model.errorCauses = nil
 	model.diagnostics = nil
 	model.commandErr = ""
+	model.formErr = ""
 	model.wizard = wizard{}
 	model.plan = app.Plan{}
 	model.screen = screenHosts
@@ -916,6 +1011,7 @@ func (model Model) showError(err error) Model {
 	}
 	summary, causes := safeErrorChain(err)
 	model.screen, model.loading, model.err = screenError, false, errors.New(summary)
+	model.formErr = ""
 	model.errorCauses = causes
 	model.diagnostics = diagnosticCommands(summary)
 	return model
@@ -1053,32 +1149,6 @@ func (model Model) validateConfigurations(ctx context.Context, operationID uint6
 	}
 }
 
-func renderChanges(plan app.Plan) string {
-	var builder strings.Builder
-	for _, change := range plan.Changes {
-		_, _ = fmt.Fprintf(&builder, "%s %s\n", change.Action, change.Path)
-	}
-	return builder.String()
-}
-
-func renderNotices(plan app.Plan) string {
-	if len(plan.Notices) == 0 {
-		return ""
-	}
-	var builder strings.Builder
-	_, _ = fmt.Fprintln(&builder, "\nNotes:")
-	for _, notice := range plan.Notices {
-		_, _ = fmt.Fprintf(&builder, "  - %s\n", notice)
-	}
-	return builder.String()
-}
-
-func statusLine(model Model) string {
-	if model.status == "" {
-		return ""
-	}
-	return "\n" + model.styles.status.Render(model.status)
-}
 func unbracket(value string) string { return strings.TrimPrefix(strings.TrimSuffix(value, "]"), "[") }
 func titleWord(value string) string {
 	if value == "" {

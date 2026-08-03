@@ -65,7 +65,57 @@ The Linux path can be changed in `defaults.identity_agent`.
 
 ## Install
 
-Build from source:
+### Homebrew
+
+The repository is also an explicit Homebrew tap. Install the current checksum-verified release with:
+
+```bash
+brew tap vlyl/opssh https://github.com/vlyl/opssh.git
+brew install --cask vlyl/opssh/opssh
+```
+
+Upgrade or remove it later with:
+
+```bash
+brew upgrade --cask vlyl/opssh/opssh
+brew uninstall --cask opssh
+```
+
+Homebrew removes the executable only. It does not delete managed SSH configuration, public-key files, or opssh state.
+
+### Install script
+
+The installer detects macOS/Linux and `amd64`/`arm64`, downloads the matching GitHub Release, verifies it against `checksums.txt`, and installs without `sudo` to `~/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vlyl/opssh/main/install.sh | sh
+```
+
+For a safer inspect-then-run flow:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/vlyl/opssh/main/install.sh
+less install.sh
+sh install.sh
+```
+
+Pin a version or choose another install directory with environment variables:
+
+```bash
+OPSSH_VERSION=0.1.0 OPSSH_INSTALL_DIR="$HOME/bin" sh install.sh
+```
+
+The destination must already be writable; the installer never invokes `sudo`. If `~/.local/bin` is not on `PATH`, the installer prints the command needed to add it.
+
+To uninstall a script-installed copy without touching configuration or state:
+
+```bash
+rm ~/.local/bin/opssh
+```
+
+### Build from source
+
+Go 1.26 or newer is required only for this method:
 
 ```bash
 git clone https://github.com/vlyl/opssh.git
@@ -73,10 +123,6 @@ cd opssh
 make build
 install -m 0755 bin/opssh ~/.local/bin/opssh
 ```
-
-For releases, download the archive for `darwin/arm64`, `darwin/amd64`, `linux/arm64`, or `linux/amd64`, verify it against `checksums.txt`, and place `opssh` on `PATH`.
-
-The repository also contains an illustrative [Homebrew formula](homebrew/opssh.rb.example). Replace its example checksums with those from a real release.
 
 ## First use
 
@@ -175,28 +221,33 @@ opssh completion bash|zsh|fish
 
 The TUI includes:
 
-- searchable Host list;
-- Add and Edit wizards, including host-alias rename as the first Edit field;
+- responsive Host dashboard with a selected-host detail pane on wide terminals;
+- searchable lists, contextual key hints, `?` keyboard help, and `r` refresh;
+- guided Add and Edit wizards with progress, inline validation, and `Shift+Tab` to move back;
+- host-alias rename as the first Edit field and preserved proxy values while editing;
 - 1Password public-key and proxy pickers;
-- configuration preview and deletion confirmation;
+- configuration preview with `e` to revise the draft before applying;
+- explicit deletion confirmation that explains what is and is not removed;
 - connection testing and error detail;
 - Doctor and Tunnel tables;
 - loading spinners, cancelable operations, small-terminal fallback, Ctrl+C, and `NO_COLOR` support.
 
-Press `:` from the host, Doctor, Tunnel, or error screen to open the built-in command input. It accepts `doctor`, `config validate`, `list`, `tunnel list`, `retry`, `cancel`, and `quit` (an optional `opssh ` prefix is accepted). Arbitrary shell commands are deliberately not executed.
+Press `:` from the host, Doctor, Tunnel, or error screen to open the built-in command input. It accepts `doctor`, `config validate`, `list`, `tunnel list`, `retry`, `cancel`, `help`, and `quit` (an optional `opssh ` prefix is accepted). Arbitrary shell commands are deliberately not executed.
 
 An error screen shows the operation, a redacted cause chain, and relevant diagnostic commands. Press `r` to retry, `Enter` or `:` to open the command input, or `Esc` to cancel the failed operation and return to the host list. `Esc` also cancels an operation while its loading spinner is active; a late result from that canceled operation is ignored.
 
 ```text
-┌─ opssh hosts ───────────────────────────────────────────────┐
-│ Alias       Target               Key          Proxy   Status│
-│ prod-web    192.0.2.10:22        SHA256:...   socks5  ready │
-└──────────────────────────────────────────────────────────────┘
-Enter Connect   a Add   e Edit   t Tunnel   s Sync
-d Delete        x Test  D Doctor / Search   : Command   q Quit
+opssh  /  Hosts                                          2 hosts
+────────────────────────────────────────────────────────────────
+╭──────────────────────────────╮ ╭─────────────────────────────╮
+│ ┃ prod-web                   │ │ ● READY  prod-web          │
+│ ┃ ubuntu@192.0.2.10:22       │ │ Target    ubuntu@...:22    │
+│   gitlab-work                │ │ Route     Direct           │
+│   git@gitlab.example.com:22  │ │ Identity  Production      │
+╰──────────────────────────────╯ ╰─────────────────────────────╯
+enter connect  a add  e edit  s sync  x test  t tunnels
+D doctor  r refresh  / search  : command  ? help  q quit
 ```
-
-Screenshot placeholder: add an asciinema recording or PNG under `docs/` when publishing a release.
 
 ## Proxy examples
 

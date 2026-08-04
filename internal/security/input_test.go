@@ -80,4 +80,16 @@ func TestContainsSensitiveMarker(t *testing.T) {
 	if ContainsSensitiveMarker([]byte("ssh-ed25519 AAAAC3 public@example")) {
 		t.Fatal("public key was incorrectly classified")
 	}
+	for _, marker := range []string{
+		"-----BEGIN ENCRYPTED PRIVATE KEY-----",
+		"-----BEGIN DSA PRIVATE KEY-----",
+		"-----BEGIN FUTURE-ALGORITHM PRIVATE KEY-----",
+		"-----BEGIN PGP PRIVATE KEY BLOCK-----",
+		"PuTTY-User-Key-File-3: ssh-ed25519",
+		"---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----",
+	} {
+		if !ContainsSensitiveMarker([]byte(marker)) {
+			t.Errorf("sensitive marker was not detected: %q", marker)
+		}
+	}
 }

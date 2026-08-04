@@ -137,6 +137,7 @@ func configureList(model *list.Model, singular, plural string, styleSet styles) 
 	model.SetStatusBarItemName(singular, plural)
 	model.DisableQuitKeybindings()
 	model.FilterInput.Prompt = "Search  "
+	model.FilterInput.KeyMap.Paste.SetEnabled(false)
 	model.FilterInput.PromptStyle = styleSet.fieldLabel
 	model.FilterInput.Cursor.Style = styleSet.cursor
 	model.Styles.PaginationStyle = styleSet.muted.PaddingLeft(1)

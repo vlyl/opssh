@@ -106,6 +106,29 @@ func TestAddIncludeIsIdempotentAndPreservesContent(t *testing.T) {
 	}
 }
 
+func TestAddIncludeMigratesBroadLegacyGlob(t *testing.T) {
+	t.Parallel()
+
+	original := []byte("Host existing\n  HostName example.com\nInclude ~/.ssh/config.d/*\n")
+	updated, changed := AddInclude(original)
+	if !changed || !HasInclude(updated) {
+		t.Fatalf("AddInclude() = %q, %v", updated, changed)
+	}
+	if strings.Contains(string(updated), legacyIncludePattern+"\n") {
+		t.Fatalf("legacy broad include remains: %s", updated)
+	}
+}
+
+func TestAddIncludeRemovesLegacyGlobBesideSafeInclude(t *testing.T) {
+	t.Parallel()
+
+	original := []byte("Include ~/.ssh/config.d/*\nInclude ~/.ssh/config.d/*.conf\n")
+	updated, changed := AddInclude(original)
+	if !changed || strings.Contains(string(updated), legacyIncludePattern+"\n") {
+		t.Fatalf("AddInclude() = %q, %v", updated, changed)
+	}
+}
+
 func testDefaults() domain.Defaults {
 	return domain.Defaults{
 		IdentityAgent:  "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock",

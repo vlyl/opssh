@@ -183,10 +183,10 @@ Before applying an interactive operation, opssh shows every path it will create,
 On the first add, opssh proposes adding:
 
 ```sshconfig
-Include ~/.ssh/config.d/*
+Include ~/.ssh/config.d/*.conf
 ```
 
-to `~/.ssh/config`. Existing content and comments are preserved, the old file is backed up, and repeated runs do not add duplicate Include directives.
+to `~/.ssh/config`. Existing content and comments are preserved, the old file is backed up, and repeated runs do not add duplicate Include directives. Older broad `config.d/*` entries are migrated to the `.conf`-only pattern so lock and backup files can never be parsed as SSH configuration.
 
 ## CLI
 
@@ -222,25 +222,39 @@ opssh completion bash|zsh|fish
 The TUI includes:
 
 - responsive Host dashboard with a selected-host detail pane on wide terminals;
-- searchable lists, contextual key hints, `?` keyboard help, and `r` refresh;
+- searchable lists with explicit page/item positions, contextual key hints, `?` interaction help, and `r` refresh;
 - guided Add and Edit wizards with progress, inline validation, and `Shift+Tab` to move back;
-- host-alias rename as the first Edit field and preserved proxy values while editing;
+- host-alias rename as the first Edit field, preserved proxy values, and an explicit keep/change identity step while editing;
 - 1Password public-key and proxy pickers;
-- configuration preview with `e` to revise the draft before applying;
+- scrollable configuration preview with `e` to revise the draft before applying;
 - explicit deletion confirmation that explains what is and is not removed;
-- connection testing and error detail;
+- connection testing, scrollable error detail, and directly runnable safe diagnostic actions;
 - Doctor and Tunnel tables;
-- loading spinners, cancelable operations, small-terminal fallback, Ctrl+C, and `NO_COLOR` support.
+- mouse selection for hosts, keys, routes, table rows, and built-in commands, plus wheel scrolling;
+- loading spinners, cancelable operations, responsive compact layouts, Ctrl+C, and `NO_COLOR` support.
 
-Press `:` from the host, Doctor, Tunnel, or error screen to open the built-in command input. It accepts `doctor`, `config validate`, `list`, `tunnel list`, `retry`, `cancel`, `help`, and `quit` (an optional `opssh ` prefix is accepted). Arbitrary shell commands are deliberately not executed.
+Press `:` to open the built-in command input. In addition to `doctor`, `config validate`, `hosts`, `tunnels`, `retry`, `help`, and `quit`, it accepts the following host-scoped commands (an optional `opssh ` prefix is accepted):
 
-An error screen shows the operation, a redacted cause chain, and relevant diagnostic commands. Press `r` to retry, `Enter` or `:` to open the command input, or `Esc` to cancel the failed operation and return to the host list. `Esc` also cancels an operation while its loading spinner is active; a late result from that canceled operation is ignored.
+```text
+connect <alias>
+test <alias>
+sync <alias>
+config render <alias>
+edit <alias>
+delete <alias>
+```
+
+Use Up/Down or the mouse to choose a command template. Arbitrary shell commands are deliberately not executed.
+
+An error screen shows the operation, a redacted cause chain, and relevant diagnostic commands. Use `Tab` to select an allowed `opssh` command and `Enter` to run it, `r` to retry, or `:` to open the command input. `Esc` cancels the failed operation and returns to the host list. `Esc` also cancels an operation while its loading spinner is active; a late result from that canceled operation is ignored.
+
+Mouse cell motion is enabled in the TUI. A single click changes the focused host, key, route, table row, or command without immediately connecting or deleting; use Enter to activate the focused item. The wheel moves list selection or scrolls Preview, Error, Help, and rendered-config views. Hold the terminal's selection modifier (commonly Shift) when you need to select terminal text.
 
 ```text
 opssh  /  Hosts                                          2 hosts
 ────────────────────────────────────────────────────────────────
 ╭──────────────────────────────╮ ╭─────────────────────────────╮
-│ ┃ prod-web                   │ │ ● READY  prod-web          │
+│ ┃ prod-web                   │ │ ● CONFIGURED  prod-web     │
 │ ┃ ubuntu@192.0.2.10:22       │ │ Target    ubuntu@...:22    │
 │   gitlab-work                │ │ Route     Direct           │
 │   git@gitlab.example.com:22  │ │ Identity  Production      │
@@ -304,6 +318,7 @@ Listeners default to loopback. A non-loopback address displays a security warnin
 ~/.config/opssh/config.yaml
 ~/.ssh/config
 ~/.ssh/config.d/<alias>.conf
+~/.ssh/config.d/.opssh-backups/
 ~/.ssh/opssh/public_keys/<alias>.pub
 ~/.local/state/opssh/tunnels/<name>.json
 ~/.local/state/opssh/logs/
@@ -348,7 +363,7 @@ Remove the executable from the location where it was installed. To remove data, 
 ~/.local/state/opssh/
 ```
 
-Then remove the opssh Include line from `~/.ssh/config` if no other configuration uses it. Backups have names containing `.opssh.bak.` and can be retained or removed after inspection.
+Then remove the opssh Include line from `~/.ssh/config` if no other configuration uses it. Backups are isolated in adjacent `.opssh-backups/` directories, have names containing `.opssh.bak.`, and can be retained or removed after inspection.
 
 Uninstalling opssh never changes 1Password items or remote servers.
 

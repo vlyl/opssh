@@ -200,6 +200,9 @@ func Validate(configuration domain.Configuration) error {
 			return fmt.Errorf("host %q: %w", alias, err)
 		}
 	}
+	if err := validateProxyJumpGraph(configuration.Hosts); err != nil {
+		return err
+	}
 	for name, tunnel := range configuration.Tunnels {
 		if err := validateTunnel(name, tunnel, configuration.Hosts); err != nil {
 			return fmt.Errorf("tunnel %q: %w", name, err)
@@ -245,6 +248,10 @@ func validateHost(alias string, host domain.Host) error {
 	if err := security.ValidateConfigPathText(host.Key.PublicKeyFile); err != nil {
 		return err
 	}
+	expectedPublicKeyFile := "~/.ssh/opssh/public_keys/" + alias + ".pub"
+	if host.Key.PublicKeyFile != expectedPublicKeyFile {
+		return errors.New("public_key_file must reference the host's opssh-managed public key")
+	}
 	if !host.Options.IdentitiesOnly {
 		return errors.New("identities_only must be true")
 	}
@@ -257,6 +264,54 @@ func validateHost(alias string, host domain.Host) error {
 		return err
 	}
 	return validateProxy(host.Proxy)
+}
+
+// ValidateHost validates a host record without resolving cross-host references.
+// Full configurations must use Validate so ProxyJump targets and cycles are checked.
+func ValidateHost(alias string, host domain.Host) error {
+	return validateHost(alias, host)
+}
+
+func validateProxyJumpGraph(hosts map[string]domain.Host) error {
+	const (
+		unvisited uint8 = iota
+		visiting
+		visited
+	)
+	state := make(map[string]uint8, len(hosts))
+	var visit func(string) error
+	visit = func(alias string) error {
+		switch state[alias] {
+		case visiting:
+			return fmt.Errorf("host %q: ProxyJump cycle detected", alias)
+		case visited:
+			return nil
+		}
+		state[alias] = visiting
+		host := hosts[alias]
+		if host.Proxy.Type == domain.ProxyJump {
+			target := host.Proxy.JumpHost
+			if target == alias {
+				return fmt.Errorf("host %q: ProxyJump cannot reference itself", alias)
+			}
+			if _, exists := hosts[target]; !exists {
+				return fmt.Errorf("host %q: ProxyJump target %q does not exist", alias, target)
+			}
+			if err := visit(target); err != nil {
+				return err
+			}
+		}
+		state[alias] = visited
+		return nil
+	}
+	for alias := range hosts {
+		if state[alias] == unvisited {
+			if err := visit(alias); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func validateProxy(proxy domain.Proxy) error {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,10 +30,15 @@ var (
 
 type Clock func() time.Time
 
+type CommandRunner interface {
+	Run(ctx context.Context, request process.Request) (process.Result, error)
+	RunInteractive(ctx context.Context, request process.Request, stdin io.Reader, stdout, stderr io.Writer) error
+}
+
 type Service struct {
 	Repository *Repository
 	Keys       domain.PublicKeyProvider
-	Runner     *process.Runner
+	Runner     CommandRunner
 	Clock      Clock
 }
 
@@ -395,12 +401,12 @@ func (service *Service) Render(alias string) ([]byte, error) {
 	return sshconfig.RenderHost(configuration.Defaults, host)
 }
 
-func (service *Service) Connect(ctx context.Context, alias string, stdin *os.File, stdout, stderr *os.File) error {
-	if _, err := service.Show(alias); err != nil {
-		return err
-	}
+func (service *Service) Connect(ctx context.Context, alias string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if service.Runner == nil {
 		return errors.New("OpenSSH runner is unavailable")
+	}
+	if err := service.ValidateEffectiveConfig(ctx, alias); err != nil {
+		return fmt.Errorf("refusing to connect with an unverified SSH identity: %w", err)
 	}
 	return service.Runner.RunInteractive(ctx, process.Request{Tool: process.ToolOpenSSH, Args: []string{alias}}, stdin, stdout, stderr)
 }
@@ -413,6 +419,10 @@ func (service *Service) ValidateEffectiveConfig(ctx context.Context, alias strin
 	if service.Runner == nil {
 		return errors.New("OpenSSH runner is unavailable")
 	}
+	expectedIdentityFile, err := service.validateManagedPublicKey(alias, host)
+	if err != nil {
+		return err
+	}
 	result, err := service.Runner.Run(ctx, process.Request{Tool: process.ToolOpenSSH, Args: []string{"-G", alias}, OutputLimit: 2 << 20})
 	if err != nil {
 		return fmt.Errorf("OpenSSH rejected the effective configuration: %w", err)
@@ -424,13 +434,37 @@ func (service *Service) ValidateEffectiveConfig(ctx context.Context, alias strin
 		return errors.New("effective SSH configuration does not enable IdentitiesOnly")
 	}
 	identityFiles := values["identityfile"]
-	if len(identityFiles) != 1 || !strings.HasSuffix(strings.ToLower(identityFiles[0]), ".pub") {
+	if len(identityFiles) != 1 {
 		return errors.New("effective SSH configuration is not pinned to exactly one public-key file")
 	}
-	if filepath.Base(identityFiles[0]) != host.Alias+".pub" {
-		return errors.New("effective SSH IdentityFile does not match the selected host")
+	effectiveIdentityFile, err := ExpandUserPath(service.Repository.Layout.Home, strings.Trim(identityFiles[0], `"'`))
+	if err != nil || filepath.Clean(effectiveIdentityFile) != filepath.Clean(expectedIdentityFile) {
+		return errors.New("effective SSH IdentityFile is outside the selected host's managed path")
 	}
 	return nil
+}
+
+func (service *Service) validateManagedPublicKey(alias string, host domain.Host) (string, error) {
+	keyPath, err := service.Repository.Layout.PublicKey(alias)
+	if err != nil {
+		return "", err
+	}
+	configuredPath, err := ExpandUserPath(service.Repository.Layout.Home, host.Key.PublicKeyFile)
+	if err != nil || filepath.Clean(configuredPath) != filepath.Clean(keyPath) {
+		return "", errors.New("configured public-key path is not the selected host's managed path")
+	}
+	keyData, _, exists, err := service.Repository.Read(keyPath, 1<<20)
+	if err != nil {
+		return "", fmt.Errorf("read managed public key: %w", err)
+	}
+	defer security.Wipe(keyData)
+	if !exists {
+		return "", errors.New("managed public-key file is missing; run opssh sync")
+	}
+	if err := sshconfig.ValidatePublicKey(keyData, host.Key.Fingerprint); err != nil {
+		return "", errors.New("managed public-key file does not match the configured fingerprint; run opssh sync")
+	}
+	return keyPath, nil
 }
 
 func (service *Service) buildRenamePlan(

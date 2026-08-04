@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/vlyl/opssh/internal/security"
 )
@@ -96,6 +97,48 @@ func (layout Layout) Ensure() error {
 			if err := os.Chmod(entry.path, entry.mode); err != nil {
 				return fmt.Errorf("restrict managed directory permissions: %w", err)
 			}
+		}
+	}
+	return layout.migrateLegacySSHBackups()
+}
+
+func (layout Layout) migrateLegacySSHBackups() error {
+	entries, err := os.ReadDir(layout.SSHConfigDir)
+	if err != nil {
+		return fmt.Errorf("inspect SSH config fragments: %w", err)
+	}
+	backupDir := filepath.Join(layout.SSHConfigDir, ".opssh-backups")
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.Contains(entry.Name(), ".opssh.bak.") {
+			continue
+		}
+		source := filepath.Join(layout.SSHConfigDir, entry.Name())
+		info, statErr := os.Lstat(source)
+		if statErr != nil {
+			return fmt.Errorf("inspect legacy SSH backup: %w", statErr)
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return ErrUnsafePath
+		}
+		if err := ensureDirectoryChain(layout.Home, backupDir, 0o700); err != nil {
+			return err
+		}
+		if err := os.Chmod(backupDir, 0o700); err != nil {
+			return fmt.Errorf("restrict SSH backup directory permissions: %w", err)
+		}
+		destination := filepath.Join(backupDir, entry.Name())
+		for suffix := 1; ; suffix++ {
+			_, destinationErr := os.Lstat(destination)
+			if errors.Is(destinationErr, os.ErrNotExist) {
+				break
+			}
+			if destinationErr != nil {
+				return fmt.Errorf("inspect migrated SSH backup destination: %w", destinationErr)
+			}
+			destination = filepath.Join(backupDir, fmt.Sprintf("%s.migrated.%d", entry.Name(), suffix))
+		}
+		if err := os.Rename(source, destination); err != nil {
+			return fmt.Errorf("migrate legacy SSH backup: %w", err)
 		}
 	}
 	return nil

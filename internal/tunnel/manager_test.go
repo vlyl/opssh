@@ -3,6 +3,7 @@ package tunnel
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,51 @@ func TestRandomInstanceID(t *testing.T) {
 	right, _ := randomInstanceID()
 	if left == right {
 		t.Fatal("random instance IDs collided")
+	}
+	for _, invalid := range []string{"", "0000", strings.Repeat("z", 32), strings.Repeat("0", 34)} {
+		if validInstanceID(invalid) {
+			t.Errorf("validInstanceID(%q) = true", invalid)
+		}
+	}
+}
+
+func TestStartRequiresBackendApprovalForNonLoopbackListener(t *testing.T) {
+	t.Parallel()
+
+	manager := testManager(t)
+	configuration, err := manager.Service.Repository.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured := configuration.Tunnels["db"]
+	configured.LocalHost = "0.0.0.0"
+	configuration.Tunnels["db"] = configured
+	data, err := config.Encode(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Service.Repository.Apply([]app.FileChange{{Path: manager.Service.Repository.Layout.ConfigFile, Data: data, Mode: 0o600}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Start(context.Background(), "db", StartOptions{}); !errors.Is(err, ErrNonLoopback) {
+		t.Fatalf("Start() error = %v, want ErrNonLoopback", err)
+	}
+}
+
+func TestSupervisorRequiresMatchingParentState(t *testing.T) {
+	t.Parallel()
+
+	manager := testManager(t)
+	instance := strings.Repeat("a", 32)
+	if err := manager.waitForSupervisorAuthorization(context.Background(), "db", instance, os.Getpid(), 20*time.Millisecond); err == nil {
+		t.Fatal("supervisor authorization succeeded without parent state")
+	}
+	state := State{Version: StateVersion, Name: "db", InstanceID: instance, PID: os.Getpid()}
+	if err := manager.writeState("db", state); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.waitForSupervisorAuthorization(context.Background(), "db", instance, os.Getpid(), time.Second); err != nil {
+		t.Fatalf("matching supervisor state was rejected: %v", err)
 	}
 }
 

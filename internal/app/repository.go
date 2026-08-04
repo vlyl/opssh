@@ -93,6 +93,20 @@ func (repository *Repository) Apply(changes []FileChange) error {
 	return repository.ApplyAndCheck(changes, nil)
 }
 
+func (repository *Repository) WithLock(path string, action func() error) error {
+	if action == nil {
+		return errors.New("managed lock action is unavailable")
+	}
+	if err := repository.Ensure(); err != nil {
+		return err
+	}
+	writer, err := repository.writerFor(path)
+	if err != nil {
+		return err
+	}
+	return writer.WithLock(path, action)
+}
+
 func (repository *Repository) ApplyAndCheck(changes []FileChange, check func() error) error {
 	if len(changes) == 0 {
 		if check != nil {

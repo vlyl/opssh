@@ -26,6 +26,18 @@ func TestGuardedWriterBlocksSplitMarkerBeforePersistence(t *testing.T) {
 	}
 }
 
+func TestGuardedWriterBlocksUnknownAlgorithmPrivateKeyMarker(t *testing.T) {
+	t.Parallel()
+
+	var destination bytes.Buffer
+	writer := NewGuardedWriter(&destination, 1024)
+	_, _ = writer.Write([]byte("safe line\n-----BEGIN FUTURE-ALGORITHM PRI"))
+	_, err := writer.Write([]byte("VATE KEY-----\nmaterial"))
+	if !errors.Is(err, ErrSensitiveStream) || destination.Len() != 0 {
+		t.Fatalf("Write() error = %v, persisted = %q", err, destination.String())
+	}
+}
+
 func TestGuardedWriterReportsShortWrites(t *testing.T) {
 	t.Parallel()
 

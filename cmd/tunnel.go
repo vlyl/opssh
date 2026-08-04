@@ -38,7 +38,8 @@ func newTunnelStartCommand(runtime *Runtime) *cobra.Command {
 			if localIP == nil {
 				return errors.New("tunnel local host is not an IP address")
 			}
-			if !localIP.IsLoopback() {
+			nonLoopback := !localIP.IsLoopback()
+			if nonLoopback {
 				_, _ = fmt.Fprintf(command.ErrOrStderr(), "WARNING: %s exposes the tunnel beyond the loopback interface.\n", configured.LocalHost)
 				approved, err := confirm(bufio.NewReader(command.InOrStdin()), command.OutOrStdout(), "Continue with a non-loopback listener?", yes)
 				if err != nil || !approved {
@@ -46,7 +47,7 @@ func newTunnelStartCommand(runtime *Runtime) *cobra.Command {
 				}
 			}
 			state, err := runtime.Tunnels.Start(command.Context(), args[0], tunnel.StartOptions{
-				Foreground: foreground, NoReconnect: noReconnect,
+				Foreground: foreground, NoReconnect: noReconnect, AllowNonLoopback: nonLoopback,
 				Input: command.InOrStdin(), Output: command.OutOrStdout(), Error: command.ErrOrStderr(),
 			})
 			if err != nil {

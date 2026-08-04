@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,12 +14,30 @@ import (
 	"github.com/vlyl/opssh/internal/config"
 	"github.com/vlyl/opssh/internal/domain"
 	securefs "github.com/vlyl/opssh/internal/filesystem"
+	"github.com/vlyl/opssh/internal/process"
 	"github.com/vlyl/opssh/internal/sshconfig"
 	"golang.org/x/crypto/ssh"
 )
 
 type fakeKeyProvider struct {
 	key domain.AuthorizedKey
+}
+
+type fakeCommandRunner struct {
+	result           process.Result
+	runErr           error
+	runCalls         int
+	interactiveCalls int
+}
+
+func (runner *fakeCommandRunner) Run(context.Context, process.Request) (process.Result, error) {
+	runner.runCalls++
+	return runner.result, runner.runErr
+}
+
+func (runner *fakeCommandRunner) RunInteractive(context.Context, process.Request, io.Reader, io.Writer, io.Writer) error {
+	runner.interactiveCalls++
+	return nil
 }
 
 func (provider *fakeKeyProvider) ListPublicKeys(context.Context) ([]domain.PublicKeyMetadata, error) {
@@ -364,6 +383,65 @@ func TestSyncRestoresMissingPublicKeyWhenFingerprintIsUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertManagedFile(t, keyPath, "ssh-ed25519 ")
+}
+
+func TestConnectRevalidatesManagedPublicKeyAndEffectivePath(t *testing.T) {
+	t.Parallel()
+
+	service, layout := testService(t)
+	plan, err := service.PrepareAdd(context.Background(), AddInput{
+		Alias: "host1", Hostname: "example.com", User: "root", Port: 22,
+		Reference: domain.KeyReference{Provider: domain.ProviderOnePassword, VaultID: "vault01", ItemID: "item01"},
+		KeyTitle:  "Key", Proxy: domain.Proxy{Type: domain.ProxyNone},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Apply(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	keyPath, _ := layout.PublicKey("host1")
+	runner := &fakeCommandRunner{result: process.Result{Stdout: []byte("identitiesonly yes\nidentityfile " + keyPath + "\n")}}
+	service.Runner = runner
+	if err := service.Connect(context.Background(), "host1", nil, nil, nil); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	if runner.runCalls != 1 || runner.interactiveCalls != 1 {
+		t.Fatalf("runner calls = (%d, %d)", runner.runCalls, runner.interactiveCalls)
+	}
+
+	if err := os.WriteFile(keyPath, testAuthorizedKey(t, 9).Line, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner.runCalls = 0
+	runner.interactiveCalls = 0
+	if err := service.Connect(context.Background(), "host1", nil, nil, nil); err == nil {
+		t.Fatal("Connect() accepted a managed public-key fingerprint mismatch")
+	}
+	if runner.runCalls != 0 || runner.interactiveCalls != 0 {
+		t.Fatal("Connect() invoked OpenSSH before validating the managed public key")
+	}
+}
+
+func TestValidateEffectiveConfigRejectsIdentityFileLookalike(t *testing.T) {
+	t.Parallel()
+
+	service, _ := testService(t)
+	plan, err := service.PrepareAdd(context.Background(), AddInput{
+		Alias: "host1", Hostname: "example.com", User: "root", Port: 22,
+		Reference: domain.KeyReference{Provider: domain.ProviderOnePassword, VaultID: "vault01", ItemID: "item01"},
+		KeyTitle:  "Key", Proxy: domain.Proxy{Type: domain.ProxyNone},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Apply(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	service.Runner = &fakeCommandRunner{result: process.Result{Stdout: []byte("identitiesonly yes\nidentityfile /tmp/host1.pub\n")}}
+	if err := service.ValidateEffectiveConfig(context.Background(), "host1"); err == nil {
+		t.Fatal("ValidateEffectiveConfig() accepted an IdentityFile path lookalike")
+	}
 }
 
 func TestRepositoryRejectsSensitiveManagedFileContent(t *testing.T) {

@@ -31,6 +31,7 @@ var (
 	ErrTunnelRunning = errors.New("tunnel is already running")
 	ErrPortInUse     = errors.New("tunnel local endpoint is already in use")
 	ErrUnsafeProcess = errors.New("tunnel process identity did not match its state file")
+	ErrNonLoopback   = errors.New("non-loopback tunnel listener requires explicit approval")
 )
 
 type Manager struct {
@@ -40,11 +41,12 @@ type Manager struct {
 }
 
 type StartOptions struct {
-	Foreground  bool
-	NoReconnect bool
-	Input       io.Reader
-	Output      io.Writer
-	Error       io.Writer
+	Foreground       bool
+	NoReconnect      bool
+	AllowNonLoopback bool
+	Input            io.Reader
+	Output           io.Writer
+	Error            io.Writer
 }
 
 type State struct {
@@ -92,20 +94,43 @@ func (manager Manager) Start(ctx context.Context, name string, options StartOpti
 	}
 	localEndpoint := net.JoinHostPort(unbracket(configured.LocalHost), strconv.Itoa(int(configured.LocalPort)))
 	remoteTarget := net.JoinHostPort(unbracket(configured.RemoteHost), strconv.Itoa(int(configured.RemotePort)))
+	localIP := net.ParseIP(unbracket(configured.LocalHost))
+	if localIP == nil {
+		return State{}, errors.New("tunnel local host is not an IP address")
+	}
+	if !localIP.IsLoopback() && !options.AllowNonLoopback {
+		return State{}, ErrNonLoopback
+	}
+	sshArgs := sshArguments(configured, defaults)
+	if options.Foreground {
+		if err := checkPortAvailable(ctx, localEndpoint); err != nil {
+			return State{}, err
+		}
+		if err := manager.Runner.RunInteractive(ctx, process.Request{Tool: process.ToolOpenSSH, Args: sshArgs}, options.Input, options.Output, options.Error); err != nil {
+			return State{}, err
+		}
+		return State{Name: name, HostAlias: configured.SSHHost, LocalEndpoint: localEndpoint, RemoteTarget: remoteTarget}, nil
+	}
+	statePath, err := manager.Service.Repository.Layout.TunnelState(name)
+	if err != nil {
+		return State{}, err
+	}
+	var state State
+	err = manager.Service.Repository.WithLock(statePath+".lifecycle.lock", func() error {
+		var startErr error
+		state, startErr = manager.startBackground(ctx, name, configured, localEndpoint, remoteTarget, options)
+		return startErr
+	})
+	return state, err
+}
+
+func (manager Manager) startBackground(ctx context.Context, name string, configured domain.Tunnel, localEndpoint, remoteTarget string, options StartOptions) (State, error) {
 	if status, statusErr := manager.Status(ctx, name); statusErr == nil && status.Running {
 		return State{}, ErrTunnelRunning
 	}
 	if err := checkPortAvailable(ctx, localEndpoint); err != nil {
 		return State{}, err
 	}
-	sshArgs := sshArguments(configured, defaults)
-	if options.Foreground {
-		if err := manager.Runner.RunInteractive(ctx, process.Request{Tool: process.ToolOpenSSH, Args: sshArgs}, options.Input, options.Output, options.Error); err != nil {
-			return State{}, err
-		}
-		return State{Name: name, HostAlias: configured.SSHHost, LocalEndpoint: localEndpoint, RemoteTarget: remoteTarget}, nil
-	}
-
 	instanceID, err := randomInstanceID()
 	if err != nil {
 		return State{}, errors.New("could not create tunnel instance ID")
@@ -137,7 +162,7 @@ func (manager Manager) Start(ctx context.Context, name string, options StartOpti
 	}
 	if err := waitForListener(ctx, localEndpoint, detached.PID, 8*time.Second); err != nil {
 		_ = terminateProcess(detached.PID)
-		_ = manager.removeState(name)
+		_ = manager.removeStateForInstance(name, instanceID)
 		return State{}, err
 	}
 	return state, nil
@@ -148,8 +173,11 @@ func (manager Manager) Supervise(ctx context.Context, name, instanceID string, r
 	if err != nil {
 		return err
 	}
-	if len(instanceID) != 32 {
+	if !validInstanceID(instanceID) {
 		return errors.New("invalid tunnel instance ID")
+	}
+	if err := manager.waitForSupervisorAuthorization(ctx, name, instanceID, os.Getpid(), 5*time.Second); err != nil {
+		return err
 	}
 	logPath, _ := manager.Service.Repository.Layout.TunnelLog(name)
 	if err := manager.Service.Repository.Ensure(); err != nil {
@@ -225,6 +253,16 @@ func (writer *cancelOnErrorWriter) Err() error {
 }
 
 func (manager Manager) Stop(ctx context.Context, name string) error {
+	path, err := manager.Service.Repository.Layout.TunnelState(name)
+	if err != nil {
+		return err
+	}
+	return manager.Service.Repository.WithLock(path+".lifecycle.lock", func() error {
+		return manager.stopLocked(ctx, name)
+	})
+}
+
+func (manager Manager) stopLocked(ctx context.Context, name string) error {
 	state, data, err := manager.readState(name)
 	if err != nil {
 		return err
@@ -321,19 +359,42 @@ func (manager Manager) readState(name string) (State, []byte, error) {
 	var state State
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&state); err != nil || state.Version != StateVersion || state.Name != name || state.PID < 1 || len(state.InstanceID) != 32 {
+	if err := decoder.Decode(&state); err != nil || state.Version != StateVersion || state.Name != name || state.PID < 1 || !validInstanceID(state.InstanceID) {
 		return State{}, data, errors.New("invalid tunnel state")
 	}
 	return state, data, nil
 }
 
-func (manager Manager) removeState(name string) error {
-	path, _ := manager.Service.Repository.Layout.TunnelState(name)
-	_, _, exists, err := manager.Service.Repository.Read(path, 1<<20)
-	if err != nil || !exists {
+func (manager Manager) removeStateForInstance(name, instanceID string) error {
+	state, data, err := manager.readState(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	return manager.Service.Repository.Apply([]app.FileChange{{Path: path, Delete: true}})
+	defer security.Wipe(data)
+	if state.InstanceID != instanceID {
+		return ErrUnsafeProcess
+	}
+	return manager.removeStateExpected(name, data)
+}
+
+func (manager Manager) waitForSupervisorAuthorization(ctx context.Context, name, instanceID string, pid int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		state, data, err := manager.readState(name)
+		security.Wipe(data)
+		if err == nil && state.InstanceID == instanceID && state.PID == pid {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	return errors.New("tunnel supervisor was not authorized by its parent process")
 }
 
 func (manager Manager) removeStateExpected(name string, data []byte) error {
@@ -438,6 +499,11 @@ func randomInstanceID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(data), nil
+}
+
+func validInstanceID(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == 16
 }
 
 func (manager Manager) now() time.Time {

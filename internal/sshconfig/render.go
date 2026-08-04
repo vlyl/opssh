@@ -51,11 +51,7 @@ type hostTemplateData struct {
 }
 
 func RenderHost(defaults domain.Defaults, host domain.Host) ([]byte, error) {
-	configuration := domain.Configuration{
-		Version: domain.CurrentConfigVersion, Defaults: defaults,
-		Hosts: map[string]domain.Host{host.Alias: host}, Tunnels: map[string]domain.Tunnel{},
-	}
-	if err := config.Validate(configuration); err != nil {
+	if err := config.ValidateHost(host.Alias, host); err != nil {
 		return nil, fmt.Errorf("validate host before rendering: %w", err)
 	}
 	if !strings.HasSuffix(strings.ToLower(host.Key.PublicKeyFile), ".pub") {

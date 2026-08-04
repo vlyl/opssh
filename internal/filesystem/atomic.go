@@ -180,7 +180,14 @@ func (writer *AtomicWriter) Write(path string, data []byte, options WriteOptions
 		}
 		if exists {
 			defer clearBytes(oldData)
-			result.BackupPath = fmt.Sprintf("%s.opssh.bak.%d", absPath, time.Now().UTC().UnixNano())
+			backupDir := filepath.Join(filepath.Dir(absPath), ".opssh-backups")
+			if err := ensureDirectoryChain(writer.Root, backupDir, 0o700); err != nil {
+				return WriteResult{}, fmt.Errorf("prepare backup directory: %w", err)
+			}
+			if err := os.Chmod(backupDir, 0o700); err != nil {
+				return WriteResult{}, fmt.Errorf("restrict backup directory permissions: %w", err)
+			}
+			result.BackupPath = filepath.Join(backupDir, fmt.Sprintf("%s.opssh.bak.%d", filepath.Base(absPath), time.Now().UTC().UnixNano()))
 			if err := writer.writePrepared(result.BackupPath, oldData, oldMode.Perm()); err != nil {
 				return WriteResult{}, fmt.Errorf("create backup: %w", err)
 			}

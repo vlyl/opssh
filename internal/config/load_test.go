@@ -94,6 +94,47 @@ func TestParseRejectsDisabledIdentitiesOnly(t *testing.T) {
 	}
 }
 
+func TestParseRejectsPublicKeyOutsideManagedAliasPath(t *testing.T) {
+	t.Parallel()
+
+	text := strings.Replace(validConfig, "~/.ssh/opssh/public_keys/prod-web.pub", "/tmp/prod-web.pub", 1)
+	if _, err := Parse(strings.NewReader(text)); err == nil {
+		t.Fatal("Parse() accepted a public key outside the managed alias path")
+	}
+}
+
+func TestValidateRejectsInvalidProxyJumpGraph(t *testing.T) {
+	t.Parallel()
+
+	configuration, err := Parse(strings.NewReader(validConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := configuration.Hosts["prod-web"]
+	host.Proxy = domain.Proxy{Type: domain.ProxyJump, JumpHost: "missing"}
+	configuration.Hosts["prod-web"] = host
+	if err := Validate(configuration); err == nil {
+		t.Fatal("Validate() accepted a missing ProxyJump target")
+	}
+
+	host.Proxy.JumpHost = "prod-web"
+	configuration.Hosts["prod-web"] = host
+	if err := Validate(configuration); err == nil {
+		t.Fatal("Validate() accepted a self-referencing ProxyJump")
+	}
+
+	jump := host
+	jump.Alias = "bastion"
+	jump.Key.PublicKeyFile = "~/.ssh/opssh/public_keys/bastion.pub"
+	jump.Proxy.JumpHost = "prod-web"
+	configuration.Hosts["bastion"] = jump
+	host.Proxy.JumpHost = "bastion"
+	configuration.Hosts["prod-web"] = host
+	if err := Validate(configuration); err == nil {
+		t.Fatal("Validate() accepted a ProxyJump cycle")
+	}
+}
+
 func TestParseRejectsSensitiveMarkerWithoutEchoingIt(t *testing.T) {
 	t.Parallel()
 

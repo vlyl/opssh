@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 	"github.com/vlyl/opssh/internal/domain"
 )
 
@@ -37,7 +38,7 @@ func (model Model) View() string {
 		body = model.renderHosts()
 	case screenInput:
 		body = model.renderInput()
-	case screenProxy, screenKeys:
+	case screenProxy, screenIdentity, screenKeys:
 		body = model.renderChoices()
 	case screenPreview:
 		body = model.renderPreview()
@@ -51,6 +52,8 @@ func (model Model) View() string {
 		body = model.renderCommandPalette()
 	case screenHelp:
 		body = model.renderHelp()
+	case screenOutput:
+		body = model.renderScrollablePanel()
 	default:
 		body = "opssh"
 	}
@@ -75,11 +78,39 @@ func (model *Model) resizeComponents() {
 	} else {
 		hostWidth = width - 6
 	}
-	model.hosts.SetSize(max(28, hostWidth), max(5, height-2))
+	model.hosts.SetSize(max(28, hostWidth), max(5, height-3))
 	model.choices.SetSize(max(28, width-6), max(5, height-2))
+	if model.screen == screenKeys {
+		model.configureKeyPicker()
+	}
 	model.table.SetWidth(max(40, width-4))
 	model.table.SetHeight(max(5, height-3))
 	model.configureTableColumns()
+	if model.isScrollableScreen() {
+		model.configureViewport(false)
+	}
+}
+
+func (model Model) viewportSize() (int, int, int) {
+	panel := model.styles.panelStrong
+	panelWidth := max(24, model.contentWidth()-panel.GetHorizontalBorderSize())
+	innerWidth := max(20, panelWidth-panel.GetHorizontalPadding())
+	height := max(3, model.bodyHeight()-panel.GetVerticalFrameSize())
+	return panelWidth, innerWidth, height
+}
+
+func (model *Model) configureViewport(reset bool) {
+	_, width, height := model.viewportSize()
+	model.viewport.Width = width
+	model.viewport.Height = height
+	model.viewport.SetContent(model.scrollableContent(width))
+	if reset {
+		model.viewport.GotoTop()
+	}
+}
+
+func (model Model) isScrollableScreen() bool {
+	return model.screen == screenPreview || model.screen == screenError || model.screen == screenHelp || model.screen == screenOutput
 }
 
 func (model *Model) configureTable(first, second, third string) {
@@ -111,7 +142,7 @@ func (model Model) contentWidth() int {
 
 func (model Model) bodyHeight() int {
 	if model.height <= 0 {
-		return 17
+		return 24
 	}
 	return max(5, model.height-7)
 }
@@ -146,6 +177,8 @@ func (model Model) screenTitle() string {
 		return "Add host"
 	case screenProxy:
 		return "Connection route"
+	case screenIdentity:
+		return "SSH identity"
 	case screenKeys:
 		return "SSH identity"
 	case screenPreview:
@@ -161,7 +194,9 @@ func (model Model) screenTitle() string {
 	case screenCommand:
 		return "Command palette"
 	case screenHelp:
-		return "Keyboard help"
+		return "Interaction help"
+	case screenOutput:
+		return model.outputTitle
 	default:
 		return ""
 	}
@@ -177,14 +212,30 @@ func (model Model) renderHosts() string {
 	}
 
 	if width < detailWidth {
-		return model.styles.panel.Width(max(28, width-4)).Render(model.hosts.View())
+		return model.styles.panel.Width(max(28, width-4)).Render(model.renderHostList())
 	}
 
 	leftWidth := (width * 58) / 100
 	rightWidth := width - leftWidth - 1
-	left := model.styles.panel.Width(max(28, leftWidth-4)).Render(model.hosts.View())
+	left := model.styles.panel.Width(max(28, leftWidth-4)).Render(model.renderHostList())
 	right := model.styles.panelStrong.Width(max(28, rightWidth-4)).Height(max(8, model.bodyHeight())).Render(model.renderHostDetail(rightWidth - 6))
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right)
+}
+
+func (model Model) renderHostList() string {
+	count := len(model.hosts.VisibleItems())
+	page := model.hosts.Paginator.Page
+	pages := max(1, model.hosts.Paginator.TotalPages)
+	left := fmt.Sprintf("%d hosts", count)
+	if model.hosts.IsFiltered() {
+		left = fmt.Sprintf("%d matches", count)
+	}
+	right := fmt.Sprintf("Page %d of %d", page+1, pages)
+	if count > 0 {
+		right += fmt.Sprintf("  •  Host %d of %d", model.hosts.Index()+1, count)
+	}
+	width := max(24, model.hosts.Width())
+	return joinEdges(model.styles.title.Render(left), model.styles.muted.Render(right), width) + "\n" + model.hosts.View()
 }
 
 func (model Model) renderHostDetail(width int) string {
@@ -199,15 +250,15 @@ func (model Model) renderHostDetail(width int) string {
 		keyTitle = "1Password SSH Key"
 	}
 	lines := []string{
-		model.styles.accent.Render("● READY") + "  " + model.styles.title.Render(host.Alias),
+		model.styles.accent.Render("● CONFIGURED") + "  " + model.styles.title.Render(host.Alias),
 		"",
 		detailRow(model, "Target", target, width),
 		detailRow(model, "Route", route, width),
 		detailRow(model, "Identity", keyTitle, width),
 		detailRow(model, "Fingerprint", host.Key.Fingerprint, width),
 		"",
-		model.styles.muted.Render("OpenSSH offers only this public identity"),
-		model.styles.muted.Render("with IdentitiesOnly enabled."),
+		model.styles.muted.Render("Managed config pins this public identity."),
+		model.styles.muted.Render("Run Test to verify network and authentication readiness."),
 	}
 	return strings.Join(lines, "\n")
 }
@@ -297,17 +348,131 @@ func (model Model) renderWizardSummary(width int) string {
 }
 
 func (model Model) renderChoices() string {
+	if model.screen == screenKeys {
+		return model.renderKeyPicker()
+	}
 	width := model.contentWidth()
 	description := "Choose how OpenSSH reaches this host. Direct is the safest default."
-	if model.screen == screenKeys {
-		description = "Choose the public identity OpenSSH should request from the 1Password SSH Agent."
+	if model.screen == screenIdentity {
+		description = "Keep the current public identity or bind this host to another 1Password SSH key."
 	}
 	return model.styles.subtitle.Render(description) + "\n\n" +
 		model.styles.panelStrong.Width(max(28, width-4)).Render(model.choices.View())
 }
 
-func (model Model) renderPreview() string {
+func (model Model) keyPickerColumns() int {
+	if model.contentWidth() >= 104 {
+		return 2
+	}
+	return 1
+}
+
+func (model Model) keyPickerRows() int {
+	return max(1, (model.bodyHeight()-5)/3)
+}
+
+func (model *Model) configureKeyPicker() {
+	index := model.choices.Index()
+	count := len(model.choices.VisibleItems())
+	model.choices.Paginator.PerPage = model.keyPickerColumns() * model.keyPickerRows()
+	if count == 0 {
+		model.choices.Paginator.TotalPages = 1
+		model.choices.Select(0)
+		return
+	}
+	model.choices.Paginator.SetTotalPages(count)
+	model.choices.Select(min(index, count-1))
+}
+
+func (model Model) renderKeyPicker() string {
 	width := model.contentWidth()
+	panel := model.styles.panelStrong
+	panelWidth := max(24, width-panel.GetHorizontalBorderSize())
+	innerWidth := max(20, panelWidth-panel.GetHorizontalPadding())
+	items := model.choices.VisibleItems()
+	count := len(items)
+	page := model.choices.Paginator.Page
+	pages := max(1, model.choices.Paginator.TotalPages)
+	index := model.choices.Index()
+
+	left := fmt.Sprintf("%d SSH keys", count)
+	if model.choices.SettingFilter() {
+		left = model.choices.FilterInput.View()
+	} else if model.choices.IsFiltered() {
+		left = fmt.Sprintf("%d matches for %q", count, model.choices.FilterValue())
+	}
+	right := fmt.Sprintf("Page %d of %d", page+1, pages)
+	if count > 0 {
+		right += fmt.Sprintf("  •  Item %d of %d", index+1, count)
+	}
+
+	parts := []string{joinEdges(model.styles.title.Render(left), model.styles.muted.Render(right), innerWidth), ""}
+	perPage := max(1, model.choices.Paginator.PerPage)
+	start := min(page*perPage, count)
+	end := min(start+perPage, count)
+	columns := model.keyPickerColumns()
+	gap := 3
+	cardWidth := innerWidth
+	if columns == 2 {
+		cardWidth = max(18, (innerWidth-gap)/2)
+	}
+	for rowStart := start; rowStart < end; rowStart += columns {
+		cards := make([]string, 0, columns)
+		for column := 0; column < columns; column++ {
+			itemIndex := rowStart + column
+			if itemIndex < end {
+				cards = append(cards, model.renderKeyCard(items[itemIndex], itemIndex == index, cardWidth))
+			} else {
+				cards = append(cards, strings.Repeat(" ", cardWidth))
+			}
+		}
+		row := cards[0]
+		if len(cards) == 2 {
+			row = lipgloss.JoinHorizontal(lipgloss.Top, cards[0], strings.Repeat(" ", gap), cards[1])
+		}
+		parts = append(parts, row)
+		if rowStart+columns < end {
+			parts = append(parts, "")
+		}
+	}
+	if count == 0 {
+		parts = append(parts, model.styles.muted.Render("No SSH keys match the current search."))
+	}
+
+	descriptionText := "Choose the public identity OpenSSH should request from the 1Password SSH Agent."
+	if width < detailWidth {
+		descriptionText = "Choose a 1Password SSH public identity."
+	}
+	description := model.styles.subtitle.Width(width).Render(descriptionText)
+	return description + "\n\n" + panel.Width(panelWidth).Render(strings.Join(parts, "\n"))
+}
+
+func (model Model) renderKeyCard(item list.Item, selected bool, width int) string {
+	key, ok := item.(keyItem)
+	if !ok {
+		return strings.Repeat(" ", width)
+	}
+	card := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).PaddingLeft(1).BorderForeground(model.styles.muted.GetForeground())
+	if selected {
+		card = card.BorderForeground(model.styles.accent.GetForeground())
+	}
+	boxWidth := max(1, width-card.GetHorizontalBorderSize())
+	contentWidth := max(1, boxWidth-card.GetHorizontalPadding())
+	title := model.styles.title.Render(truncate(key.Title(), contentWidth))
+	if selected {
+		title = model.styles.accent.Render(truncate(key.Title(), contentWidth))
+	}
+	description := model.styles.muted.Render(truncate(key.Description(), contentWidth))
+	return card.Width(boxWidth).Render(title + "\n" + description)
+}
+
+func (model Model) renderPreview() string {
+	return model.renderScrollablePanel()
+}
+
+func (model Model) previewContent(innerWidth int) string {
+	code := model.styles.code.Padding(0, 1)
+	codeWidth := innerWidth
 	var changes strings.Builder
 	if len(model.plan.Changes) == 0 {
 		_, _ = fmt.Fprint(&changes, model.styles.muted.Render("No managed files change."))
@@ -320,7 +485,7 @@ func (model Model) renderPreview() string {
 		model.styles.subtitle.Render("Review the exact OpenSSH fragment and managed paths before applying."),
 		"",
 		model.styles.title.Render("OpenSSH preview"),
-		model.styles.code.Width(max(24, width-4)).Padding(0, 1).Render(strings.TrimSpace(model.plan.ConfigPreview)),
+		code.Width(codeWidth).Render(strings.TrimSpace(model.plan.ConfigPreview)),
 		"",
 		model.styles.title.Render("File changes"),
 		strings.TrimRight(changes.String(), "\n"),
@@ -331,7 +496,7 @@ func (model Model) renderPreview() string {
 			sections = append(sections, "  • "+notice)
 		}
 	}
-	return model.styles.panelStrong.Width(max(28, width-4)).Render(strings.Join(sections, "\n"))
+	return lipgloss.NewStyle().Width(innerWidth).Render(strings.Join(sections, "\n"))
 }
 
 func (model Model) renderDeleteConfirmation() string {
@@ -354,44 +519,88 @@ func (model Model) renderTable() string {
 		model.styles.panel.Width(max(36, model.contentWidth()-4)).Render(model.table.View())
 }
 
+func (model Model) selectedTableVisualRow() (int, bool) {
+	row := model.table.SelectedRow()
+	columns := model.table.Columns()
+	if len(row) == 0 || len(columns) == 0 {
+		return 0, false
+	}
+	for index, line := range strings.Split(model.table.View(), "\n") {
+		if index > 0 && tableLineContainsRow(line, row, columns) {
+			return index - 1, true
+		}
+	}
+	return 0, false
+}
+
+func tableLineContainsRow(line string, row table.Row, columns []table.Column) bool {
+	matched := false
+	for index, value := range row {
+		if index >= len(columns) || columns[index].Width <= 0 || value == "" {
+			continue
+		}
+		token := runewidth.Truncate(value, columns[index].Width, "…")
+		if token == "" || !strings.Contains(line, token) {
+			return false
+		}
+		matched = true
+	}
+	return matched
+}
+
 func (model Model) renderErrorView() string {
+	return model.renderScrollablePanel()
+}
+
+func (model Model) errorContent(innerWidth int) string {
 	operation := model.operation
 	if operation == "" {
 		operation = "unspecified operation"
 	}
+	summary := "unknown error"
+	if model.err != nil {
+		summary = model.err.Error()
+	}
 	var builder strings.Builder
 	_, _ = fmt.Fprintln(&builder, model.styles.error.Render("! The operation did not complete"))
-	_, _ = fmt.Fprintf(&builder, "\n%s\n  %s\n\n%s\n  %s\n", model.styles.title.Render("Operation:"), operation, model.styles.title.Render("Summary:"), model.err.Error())
+	_, _ = fmt.Fprintf(&builder, "\n%s\n  %s\n\n%s\n  %s\n", model.styles.title.Render("Operation:"), operation, model.styles.title.Render("Summary:"), summary)
 	if len(model.errorCauses) > 0 {
 		_, _ = fmt.Fprintln(&builder, "\n"+model.styles.title.Render("Cause chain:"))
 		for index, cause := range model.errorCauses {
 			_, _ = fmt.Fprintf(&builder, "  %d. %s\n", index+1, cause)
 		}
 	}
-	if len(model.diagnostics) > 0 {
-		_, _ = fmt.Fprintln(&builder, "\n"+model.styles.title.Render("Diagnostic commands:"))
-		for _, command := range model.diagnostics {
-			_, _ = fmt.Fprintf(&builder, "  %s\n", model.styles.code.Padding(0, 1).Render(command))
+	if len(model.errorActions) > 0 {
+		_, _ = fmt.Fprintln(&builder, "\n"+model.styles.title.Render("Suggested next steps:"))
+		for _, action := range model.errorActions {
+			_, _ = fmt.Fprintf(&builder, "  • %s\n", action)
 		}
 	}
-	return model.styles.panelStrong.Width(max(34, model.contentWidth()-4)).Render(strings.TrimRight(builder.String(), "\n"))
+	if len(model.diagnostics) > 0 {
+		_, _ = fmt.Fprintln(&builder, "\n"+model.styles.title.Render("Diagnostic commands:"))
+		for index, command := range model.diagnostics {
+			prefix := "  "
+			style := model.styles.code.Padding(0, 1)
+			if index == model.errorCommand && isBuiltinCommand(command) {
+				prefix = model.styles.accent.Render("› ")
+				style = style.Bold(true)
+			}
+			_, _ = fmt.Fprintf(&builder, "%s%s\n", prefix, style.Render(command))
+		}
+		_, _ = fmt.Fprintln(&builder, model.styles.muted.Render("  Tab selects an opssh command · Enter runs it"))
+	}
+	return lipgloss.NewStyle().Width(innerWidth).Render(strings.TrimRight(builder.String(), "\n"))
 }
 
 func (model Model) renderCommandPalette() string {
 	width := model.contentWidth()
-	commands := []string{
-		"doctor          Run environment diagnostics",
-		"config validate Validate every managed SSH host",
-		"hosts           Refresh the managed host list",
-		"tunnels         Open tunnel status",
-		"retry           Retry the last failed operation",
-		"cancel          Cancel the current operation",
-		"help            Open keyboard help",
-		"quit            Exit opssh",
-	}
 	input := model.styles.panelStrong.Width(min(76, max(28, width-4))).Render(model.command.View())
+	description := "Run an opssh built-in. Shell commands are intentionally disabled."
+	if width < detailWidth {
+		description = "Run a safe opssh built-in command."
+	}
 	parts := []string{
-		model.styles.subtitle.Render("Run an opssh built-in. Shell commands are intentionally disabled."),
+		model.styles.subtitle.Width(width).Render(description),
 		"",
 		input,
 	}
@@ -399,19 +608,47 @@ func (model Model) renderCommandPalette() string {
 		parts = append(parts, model.styles.error.Render("! "+model.commandErr))
 	}
 	parts = append(parts, "", model.styles.title.Render("Available commands"))
-	for _, command := range commands {
-		parts = append(parts, "  "+command)
+	specs := commandSpecs()
+	start, end := model.commandWindow(len(specs))
+	for index := start; index < end; index++ {
+		command := specs[index]
+		prefix := "  "
+		usage := model.styles.subtitle.Render(command.usage)
+		if index == model.commandIndex {
+			prefix = model.styles.accent.Render("› ")
+			usage = model.styles.accent.Render(command.usage)
+		}
+		parts = append(parts, prefix+usage+"  "+model.styles.muted.Render(command.description))
 	}
 	return strings.Join(parts, "\n")
 }
 
+func (model Model) commandWindow(count int) (int, int) {
+	visible := min(count, max(1, model.bodyHeight()-7))
+	start := max(0, model.commandIndex-visible/2)
+	if start+visible > count {
+		start = max(0, count-visible)
+	}
+	return start, min(count, start+visible)
+}
+
 func (model Model) renderHelp() string {
+	return model.renderScrollablePanel()
+}
+
+func (model Model) helpContent(innerWidth int) string {
 	sections := []string{
 		model.styles.title.Render("Navigate"),
-		"  ↑/k, ↓/j       Move selection",
+		"  ←/h, ↑/k, ↓/j, →/l  Move selection",
+		"  pgup/pgdown          Change page",
 		"  /              Search the current list",
 		"  enter          Open or confirm",
 		"  esc            Go back or cancel",
+		"  Shift+Tab      Previous wizard step",
+		"",
+		model.styles.title.Render("Mouse"),
+		"  click          Focus a host, key, route, table row, or command",
+		"  wheel          Move list selection or scroll long content",
 		"",
 		model.styles.title.Render("Hosts"),
 		"  a  Add          e  Edit          d  Delete",
@@ -420,10 +657,37 @@ func (model Model) renderHelp() string {
 		"",
 		model.styles.title.Render("Everywhere"),
 		"  :  Command palette     ?  Toggle help     q  Quit",
-		"",
-		model.styles.muted.Render("Tip: Shift+Tab moves to the previous wizard step without discarding the draft."),
+		model.styles.muted.Render("Mouse actions use the same safe built-in command allow-list as the keyboard."),
 	}
-	return model.styles.panelStrong.Width(min(82, max(34, model.contentWidth()-4))).Render(strings.Join(sections, "\n"))
+	return lipgloss.NewStyle().Width(innerWidth).Render(strings.Join(sections, "\n"))
+}
+
+func (model Model) outputContent(innerWidth int) string {
+	return model.styles.code.Padding(0, 1).Width(innerWidth).Render(strings.TrimSpace(model.outputText))
+}
+
+func (model Model) scrollableContent(innerWidth int) string {
+	switch model.screen {
+	case screenPreview:
+		return model.previewContent(innerWidth)
+	case screenError:
+		return model.errorContent(innerWidth)
+	case screenHelp:
+		return model.helpContent(innerWidth)
+	case screenOutput:
+		return model.outputContent(innerWidth)
+	default:
+		return ""
+	}
+}
+
+func (model Model) renderScrollablePanel() string {
+	panelWidth, innerWidth, height := model.viewportSize()
+	contentViewport := model.viewport
+	contentViewport.Width = innerWidth
+	contentViewport.Height = height
+	contentViewport.SetContent(model.scrollableContent(innerWidth))
+	return model.styles.panelStrong.Width(panelWidth).Render(contentViewport.View())
 }
 
 func (model Model) renderStatus() string {
@@ -437,13 +701,23 @@ func (model Model) renderFooter() string {
 	var hints []keyHint
 	switch model.screen {
 	case screenHosts:
-		hints = []keyHint{{"enter", "connect"}, {"a", "add"}, {"e", "edit"}, {"s", "sync"}, {"x", "test"}, {"t", "tunnels"}, {"D", "doctor"}, {"r", "refresh"}, {"/", "search"}, {":", "command"}, {"?", "help"}, {"q", "quit"}}
+		if model.contentWidth() < detailWidth {
+			hints = []keyHint{{"enter", "connect"}, {"a", "add"}, {"e", "edit"}, {"/", "search"}, {":", "command"}, {"?", "more"}}
+		} else {
+			hints = []keyHint{{"enter", "connect"}, {"a", "add"}, {"e", "edit"}, {"s", "sync"}, {"x", "test"}, {"t", "tunnels"}, {"D", "doctor"}, {"r", "refresh"}, {"/", "search"}, {":", "command"}, {"?", "help"}, {"q", "quit"}}
+		}
 	case screenInput:
 		hints = []keyHint{{"enter", "continue"}, {"shift+tab", "previous"}, {"esc", "cancel"}}
-	case screenProxy, screenKeys:
+	case screenProxy, screenIdentity:
 		hints = []keyHint{{"enter", "select"}, {"shift+tab", "previous"}, {"/", "search"}, {"esc", "cancel"}, {"?", "help"}}
+	case screenKeys:
+		hints = []keyHint{{"←↑↓→", "navigate"}, {"pgup/dn", "page"}, {"enter", "select"}, {"/", "search"}, {"shift+tab", "previous"}, {"esc", "cancel"}, {"?", "help"}}
 	case screenPreview:
-		hints = []keyHint{{"enter", "apply"}, {"e", "edit draft"}, {"esc", "cancel"}, {"?", "help"}}
+		hints = []keyHint{{"j/k", "scroll"}, {"pgup/dn", model.scrollPosition()}, {"enter", "apply"}}
+		if model.canEditPreview() {
+			hints = append(hints, keyHint{"e", "edit draft"})
+		}
+		hints = append(hints, keyHint{"esc", "cancel"}, keyHint{"?", "help"})
 	case screenConfirmDelete:
 		hints = []keyHint{{"y", "remove"}, {"esc", "keep host"}}
 	case screenDoctor:
@@ -451,13 +725,22 @@ func (model Model) renderFooter() string {
 	case screenTunnels:
 		hints = []keyHint{{"j/k", "navigate"}, {"s", "start"}, {"x", "stop"}, {"esc", "hosts"}, {"?", "help"}}
 	case screenError:
-		hints = []keyHint{{"r", "retry"}, {":/enter", "command"}, {"esc", "cancel current operation"}, {"q", "quit"}}
+		hints = []keyHint{{"j/k", "scroll"}, {"pgup/dn", model.scrollPosition()}, {"tab", "select command"}, {"enter", "run"}, {"r", "retry"}, {":", "command"}, {"esc", "cancel current operation"}}
 	case screenCommand:
 		hints = []keyHint{{"enter", "run"}, {"esc", "close"}}
 	case screenHelp:
-		hints = []keyHint{{"?/esc", "close help"}}
+		hints = []keyHint{{"j/k", "scroll"}, {"pgup/dn", model.scrollPosition()}, {"?/esc", "close help"}}
+	case screenOutput:
+		hints = []keyHint{{"j/k", "scroll"}, {"pgup/dn", model.scrollPosition()}, {"enter/esc", "back"}}
 	}
 	return renderKeyHints(model.styles, hints, model.contentWidth())
+}
+
+func (model Model) scrollPosition() string {
+	if model.viewport.TotalLineCount() <= model.viewport.Height {
+		return "all"
+	}
+	return fmt.Sprintf("%d%%", int(model.viewport.ScrollPercent()*100+0.5))
 }
 
 func renderKeyHints(styleSet styles, hints []keyHint, width int) string {
@@ -508,18 +791,15 @@ func (model Model) compactView() string {
 }
 
 func (model Model) wizardProgress() string {
-	if model.screen != screenInput && model.screen != screenProxy && model.screen != screenKeys {
+	if model.screen != screenInput && model.screen != screenProxy && model.screen != screenIdentity && model.screen != screenKeys {
 		return ""
 	}
 	total := 6
-	if model.wizard.editing {
-		total = 5
-	}
 	step := model.wizard.step + 1
 	if model.screen == screenProxy || model.wizard.step == 100 {
 		step = 5
 	}
-	if model.screen == screenKeys {
+	if model.screen == screenIdentity || model.screen == screenKeys {
 		step = 6
 	}
 	return fmt.Sprintf("step %d of %d", min(step, total), total)

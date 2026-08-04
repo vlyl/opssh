@@ -22,10 +22,35 @@ func TestAtomicWriterWritesAndBacksUp(t *testing.T) {
 	}
 	assertFileContents(t, path, "new")
 	assertFileContents(t, result.BackupPath, "old")
+	if filepath.Base(filepath.Dir(result.BackupPath)) != ".opssh-backups" {
+		t.Fatalf("backup path %q is not isolated", result.BackupPath)
+	}
 	info, err := os.Stat(path)
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %v, error = %v", info.Mode().Perm(), err)
 	}
+}
+
+func TestLayoutEnsureMigratesLegacySSHBackups(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	legacyDir := filepath.Join(home, ".ssh", "config.d")
+	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(legacyDir, "prod.conf.opssh.bak.1")
+	if err := os.WriteFile(legacy, []byte("Host stale\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	layout, _ := NewLayout(home)
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(legacy); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy backup still present: %v", err)
+	}
+	assertFileContents(t, filepath.Join(legacyDir, ".opssh-backups", filepath.Base(legacy)), "Host stale\n")
 }
 
 func TestAtomicWriterKeepsOldFileOnInterruption(t *testing.T) {
